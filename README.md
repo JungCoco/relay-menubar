@@ -68,17 +68,27 @@ python3 -m venv .venv                       # (Windows: py -m venv .venv)
 > 네이티브 Windows Claude 자격증명 전환은 파일 기반으로 최선 노력(best-effort).
 > 미검증 환경에서는 WSL 권장(상위 프로젝트 `relay-account-pool` 참조).
 
+## 로그인 시 자동 실행
+
+- **macOS**: `./autostart-macos.sh` — LaunchAgent 등록(로그인마다 1개 자동 실행,
+  크래시 시 자동 재시작, 메뉴 "종료"로 끄면 그대로 유지). 해제 방법은 스크립트가 안내.
+- **Windows**: `autostart-windows.cmd` — 시작프로그램에 등록(콘솔창 없이 상주).
+
+싱글턴 잠금(로컬 포트 53918)이 있어 중복 실행돼도 아이콘은 항상 하나만 뜬다.
+
 ## 구성
 
-- `menubar.py` — `pystray` 트레이/메뉴바 앱 (아이콘 렌더·전환·60초 새로고침)
+- `menubar.py` — `pystray` 트레이/메뉴바 앱 (아이콘 렌더·전환·60초 새로고침·싱글턴)
 - `core.py` — 전환 코어(세션·서버 통신·select·apply). relay-account-pool에서 벤더링.
 - `relay-menubar` / `relay-menubar.cmd` — mac·linux / windows 런처
+- `autostart-macos.sh` / `autostart-windows.cmd` — 로그인 자동 실행 등록
+- `brand/` — 앱 아이콘: `icon.svg`(원본) · `Relay.icns`(mac) · `icon.ico`(win) · `icon-1024.png`
 
 ## 로드맵
 
-- [ ] 브랜드 로고 아이콘(디자인 중) + 상태 배지 합성
-- [ ] 로그인 시 자동 실행 (mac LaunchAgent / win 시작 프로그램)
-- [ ] 더블클릭 배포 번들 (mac `.app` / win `.exe`)
+- [x] 브랜드 로고 앱 아이콘 (`brand/`)
+- [x] 로그인 시 자동 실행 (mac LaunchAgent / win 시작 프로그램)
+- [ ] 더블클릭 배포 번들 (mac `.app` / win `.exe`) — `brand/Relay.icns`·`brand/icon.ico` 사용
 
 ---
 
