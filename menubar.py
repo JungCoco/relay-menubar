@@ -13,6 +13,7 @@ pystray로 시스템 트레이(Windows)·메뉴바(macOS)에 동일하게 동작
 서버:  환경변수 POOL_SERVER (기본값은 core.py 참조)
 """
 import json
+import socket
 import sys
 import threading
 import urllib.error
@@ -29,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import core  # noqa: E402
 
 REFRESH_SEC = 60
+SINGLETON_PORT = 53918  # 로컬 포트 바인딩으로 중복 실행 방지
 PROVIDER_LABEL = {"claude": "CLAUDE", "codex": "CODEX"}
 
 # 심각도 색 (아이콘 배경)
@@ -114,6 +116,18 @@ def make_image(worst, error=False):
     return img
 
 
+def acquire_singleton():
+    """이미 실행 중이면 None. 아니면 잠금 소켓을 반환(계속 살려둬야 함)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", SINGLETON_PORT))
+        s.listen(1)
+        return s
+    except OSError:
+        s.close()
+        return None
+
+
 def fetch_accounts():
     """GET /accounts → (accounts, error). 세션 없거나 서버 불통이면 error 문자열."""
     session = core._load_session()
@@ -136,7 +150,8 @@ def fetch_accounts():
 
 # ---------------------------------------------------------------- 앱
 class RelayTray:
-    def __init__(self):
+    def __init__(self, lock=None):
+        self._lock = lock  # 싱글턴 소켓 — GC로 닫히지 않게 참조 유지
         self._accounts = []
         self._error = None
         self._stop = threading.Event()
@@ -281,4 +296,8 @@ if __name__ == "__main__":
             make_image(w, e).save(f"/tmp/relay-icon-{fn}.png")
         print("saved /tmp/relay-icon-*.png")
     else:
-        RelayTray().run()
+        lock = acquire_singleton()
+        if lock is None:
+            print("Relay 위젯이 이미 실행 중입니다.")
+            sys.exit(0)
+        RelayTray(lock).run()
