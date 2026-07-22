@@ -1,71 +1,86 @@
-# Relay 메뉴바 위젯 (macOS)
+# Relay 트레이 위젯 (macOS · Windows)
 
-여러 Claude·Codex 계정의 구독 한도 잔량을 macOS **메뉴바**에 띄우고, 드롭다운에서
-계정을 클릭하면 이 맥의 CLI 로그인이 그 계정으로 전환된다. 계정 풀 서버
+여러 Claude·Codex 계정의 구독 한도 잔량을 **시스템 트레이(Windows)·메뉴바(macOS)**
+아이콘에 `색 + 숫자`로 띄우고, 드롭다운에서 계정을 클릭하면 이 컴퓨터의 CLI 로그인이
+그 계정으로 전환된다. **Fable 등 모델별 잔량**도 함께 표시. 계정 풀 서버
 ([relay-account-pool](https://github.com/springdayclinic4-ux/relay-account-pool))의
 `/accounts`에서 잔량을 읽는다.
 
-> Windows 작업표시줄 위젯의 macOS 대응 — 단일 계정이 아니라 **풀 전체**를 본다.
+> 한 벌의 파이썬 코드(`pystray` + `Pillow`)로 Windows·macOS에서 **동일하게** 동작한다.
+> % 는 아이콘 이미지 안에 렌더링돼 트레이·메뉴바 어느 쪽이든 똑같이 보인다.
 
 ```
-🟢 32%              ← 메뉴바 (현재 계정, 가장 빡센 창)
-──────────────────
-현재: work-max
-    5h 32%  ·  7d 61%
-──────────────────
+[🟩32]  ← 트레이/메뉴바 아이콘 (현재 계정의 가장 빡센 창 %, 색=심각도)
+────────────────────
+현재: work-max   5h 32% · 7d 61% · Fable 58%
+────────────────────
 CLAUDE
-  ● 🟢 work-max      5h 32%  7d 61%   ← 사용 중
-  ○ 🟢 backup-max    5h  8%  7d 40%
-  ○ 🔴 team-pro      5h 91%  7d 88%
+  ✓ work-max      5h 32%  7d 61%  · Fable 58%   ← 사용 중
+    backup-max    5h  8%  7d 40%  · Fable 12%
+    team-pro      5h 91%  7d 88%  · Fable 74%
 CODEX
-  ○ 🟢 codex-main    5h 12%  7d 20%
-──────────────────
-새로고침 · 종료
+    codex-main    5h 12%  7d 20%
+────────────────────
+새로고침 · 대시보드 열기 · 종료
 ```
+
+| 아이콘 색 | 사용률 |
+|---|---|
+| 🟩 초록 | < 70% |
+| 🟨 노랑 | 70–90% |
+| 🟥 빨강 | ≥ 90% |
+| ⬜ 회색 | 데이터 없음/오류 |
 
 ## 설치
+
+**공통** — Python 3.9+ 필요.
 
 ```bash
 git clone https://github.com/JungCoco/relay-menubar
 cd relay-menubar
-python3 -m venv .venv
-./.venv/bin/pip install -r requirements.txt
+python3 -m venv .venv                       # (Windows: py -m venv .venv)
+./.venv/bin/pip install -r requirements.txt  # (Windows: .venv\Scripts\pip install -r requirements.txt)
 ```
 
 ## 실행
 
-```bash
-./relay-menubar
-```
+- **macOS / Linux**: `./relay-menubar`
+- **Windows**: `relay-menubar.cmd` 더블클릭 (콘솔창 없이 트레이에 상주)
 
-메뉴바 우측에 아이콘이 뜬다. 계정을 클릭하면 이 맥의 `claude`/`codex` CLI 로그인이
-그 계정으로 전환된다(macOS 키체인 / Codex `CODEX_HOME`).
+계정을 클릭하면 이 컴퓨터의 `claude`/`codex` CLI 로그인이 그 계정으로 전환된다
+(macOS 키체인 / Codex `CODEX_HOME` / 그 외 `~/.claude/.credentials.json`).
+
+> Windows 트레이는 **우클릭**으로 메뉴가 열린다(네이티브 동작). macOS는 아이콘 클릭.
 
 - **인증**: `~/.account-pool/session` 의 개인 세션 토큰이 있어야 서버 잔량을 읽는다.
   Relay 데스크톱 앱에서 로그인하면 생성된다.
-- **서버 주소**: 환경변수 `POOL_SERVER` 로 지정(미지정 시 `core.py`의 기본값).
-- **진단**: `./.venv/bin/python menubar.py --once` — 창 없이 서버 응답만 출력.
+- **서버 주소**: 환경변수 `POOL_SERVER` (미지정 시 `core.py` 기본값).
+- **진단**: `python menubar.py --once` (서버 응답만 출력) / `--render` (샘플 아이콘 PNG).
 
-## 색상
+## 플랫폼 동작 차이 (native)
 
-| 표시 | 사용률 |
-|---|---|
-| 🟢 | < 70% |
-| 🟡 | 70–90% |
-| 🔴 | ≥ 90% |
-| ⚪ | 데이터 없음/오류 |
+| | macOS | Windows |
+|---|---|---|
+| 위치 | 메뉴바(우상단) | 시스템 트레이(우하단) |
+| 메뉴 열기 | 아이콘 클릭 | 아이콘 우클릭 |
+| 자격증명 전환 | 키체인 (`security`) | `~/.claude/.credentials.json` 파일 · Codex `CODEX_HOME` |
 
-## 로그인 시 자동 실행 (선택)
-
-`~/Library/LaunchAgents/` 에 LaunchAgent를 등록하면 로그인마다 자동으로 뜬다.
-(추후 `install.sh`로 자동화 예정.)
+> 네이티브 Windows Claude 자격증명 전환은 파일 기반으로 최선 노력(best-effort).
+> 미검증 환경에서는 WSL 권장(상위 프로젝트 `relay-account-pool` 참조).
 
 ## 구성
 
-- `menubar.py` — `rumps` 메뉴바 앱 (표시·전환·새로고침)
+- `menubar.py` — `pystray` 트레이/메뉴바 앱 (아이콘 렌더·전환·60초 새로고침)
 - `core.py` — 전환 코어(세션·서버 통신·select·apply). relay-account-pool에서 벤더링.
+- `relay-menubar` / `relay-menubar.cmd` — mac·linux / windows 런처
+
+## 로드맵
+
+- [ ] 브랜드 로고 아이콘(디자인 중) + 상태 배지 합성
+- [ ] 로그인 시 자동 실행 (mac LaunchAgent / win 시작 프로그램)
+- [ ] 더블클릭 배포 번들 (mac `.app` / win `.exe`)
 
 ---
 
-Anthropic과 무관한 비공식 내부 도구. 토큰은 사용자 맥과 사설 풀 서버에만 저장된다.
+Anthropic과 무관한 비공식 내부 도구. 토큰은 사용자 컴퓨터와 사설 풀 서버에만 저장된다.
 [MIT License](LICENSE)
