@@ -59,9 +59,10 @@ def _p(v):
 
 
 def _main_worst(a):
-    """아이콘/타이틀용 — 주 quota(세션·주간) 중 가장 높은 %."""
-    vals = [x for x in (_pct(a.get("session_pct_used")),
-                        _pct(a.get("weekly_pct_used"))) if x is not None]
+    """아이콘/타이틀용 — 세션·주간·모델별(scoped) 중 가장 높은(빡센) %."""
+    vals = [_pct(a.get("session_pct_used")), _pct(a.get("weekly_pct_used"))]
+    vals += [_pct(s.get("pct_used")) for s in (a.get("scoped") or [])]
+    vals = [v for v in vals if v is not None]
     return max(vals) if vals else None
 
 
@@ -168,12 +169,17 @@ class RelayTray:
 
     # --- 메뉴 ---
     def _acct_label(self, a, name):
-        if a.get("error"):
-            return f"{name} — 오류"
-        text = (f"{name}   5h {_p(_pct(a.get('session_pct_used')))}"
-                f"  7d {_p(_pct(a.get('weekly_pct_used')))}")
+        s, w = _pct(a.get("session_pct_used")), _pct(a.get("weekly_pct_used"))
         sc = _scoped_str(a)
-        return f"{text}  · {sc}" if sc else text
+        # 세션/주간 수집이 실패해도 Fable 등 있는 데이터는 그대로 보여준다
+        if a.get("error") and s is None and w is None and not sc:
+            return f"{name} — 오류"
+        text = f"{name}   5h {_p(s)}  7d {_p(w)}"
+        if sc:
+            text += f"  · {sc}"
+        if a.get("error"):
+            text += "  ⚠"
+        return text
 
     def _account_item(self, provider, a):
         name = a.get("label") or a.get("account_name") or "?"
