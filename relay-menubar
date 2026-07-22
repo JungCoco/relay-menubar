@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Relay 메뉴바 위젯 실행 (venv의 rumps 사용)
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+exec "$ROOT/.venv/bin/python" "$ROOT/menubar.py" "$@"

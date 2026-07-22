@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+# 로컬 상태·비밀 (절대 커밋 금지)
+.account-pool/
+*.log
