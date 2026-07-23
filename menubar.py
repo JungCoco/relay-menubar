@@ -207,13 +207,22 @@ class RelayTray:
         return "  |  ".join(parts)
 
     # --- 메뉴 ---
+    def _marker(self, a):
+        """계정 앞 색 원: 🔴 소진(≥90%) · 🟢 사용 중 · ⚪ 그 외."""
+        if _sev_key(_main_worst(a)) == "red":
+            return "🔴"
+        if self._is_current(a):
+            return "🟢"
+        return "⚪"
+
     def _acct_label(self, a, name):
         s, w = _pct(a.get("session_pct_used")), _pct(a.get("weekly_pct_used"))
         sc = _scoped_str(a)
+        dot = self._marker(a)
         # 세션/주간 수집이 실패해도 Fable 등 있는 데이터는 그대로 보여준다
         if a.get("error") and s is None and w is None and not sc:
-            return f"{name} — 오류"
-        text = f"{name}   5h {_p(s)}  7d {_p(w)}"
+            return f"{dot} {name} — 오류"
+        text = f"{dot} {name}   5h {_p(s)}  7d {_p(w)}"
         if sc:
             text += f"  · {sc}"
         if a.get("error"):
@@ -224,8 +233,7 @@ class RelayTray:
         name = a.get("label") or a.get("account_name") or "?"
         is_cur = self._is_current(a)
         action = None if is_cur else partial(self._on_switch, provider, a.get("id"), name)
-        return pystray.MenuItem(self._acct_label(a, name), action,
-                                checked=lambda _i, c=is_cur: c, enabled=not is_cur)
+        return pystray.MenuItem(self._acct_label(a, name), action, enabled=not is_cur)
 
     def _build_menu(self):
         items = []
