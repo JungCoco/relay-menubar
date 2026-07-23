@@ -60,6 +60,16 @@ def _p(v):
     return f"{v}%" if v is not None else "-"
 
 
+def _rem(used):
+    """사용률 → 남은 %. (표시는 '남은 양' 기준)"""
+    return None if used is None else max(0, 100 - int(round(float(used))))
+
+
+def _pr(used):
+    r = _rem(used)
+    return f"{r}% 남" if r is not None else "-"
+
+
 def _main_worst(a):
     """아이콘/타이틀용 — 세션·주간·모델별(scoped) 중 가장 높은(빡센) %."""
     vals = [_pct(a.get("session_pct_used")), _pct(a.get("weekly_pct_used"))]
@@ -69,8 +79,8 @@ def _main_worst(a):
 
 
 def _scoped_str(a):
-    """모델별(scoped, 예: Fable) 사용량 문자열. 없으면 ''."""
-    parts = [f"{s.get('model')} {_pct(s.get('pct_used'))}%"
+    """모델별(scoped, 예: Fable) 남은 양 문자열. 없으면 ''."""
+    parts = [f"{s.get('model')} {_pr(s.get('pct_used'))}"
              for s in (a.get("scoped") or []) if s.get("pct_used") is not None]
     return "  ".join(parts)
 
@@ -94,14 +104,14 @@ def _font(size):
     return ImageFont.load_default()
 
 
-def make_image(worst, error=False):
-    """색 배지 + 숫자(%)를 그린 트레이/메뉴바 아이콘. mac·win 공통."""
+def make_image(remaining, used_worst=None, error=False):
+    """색 배지 + 숫자(남은 %)를 그린 트레이/메뉴바 아이콘. 색은 소진 임박도(used)."""
     S = 66
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     d.rounded_rectangle([3, 3, S - 4, S - 4], radius=16,
-                        fill=SEVERITY[_sev_key(worst, error)])
-    text = "!" if error else ("–" if worst is None else str(worst))
+                        fill=SEVERITY[_sev_key(used_worst, error)])
+    text = "!" if error else ("–" if remaining is None else str(remaining))
     size, font = 46, _font(46)
     target = S - 14
     while size > 10:
@@ -201,7 +211,7 @@ class RelayTray:
         self._local = {}   # 이 컴퓨터에 실제 로그인된 provider별 이메일
         self._error = None
         self._stop = threading.Event()
-        self._icon = pystray.Icon("Relay", make_image(None), "Relay")
+        self._icon = pystray.Icon("Relay", make_image(None, None), "Relay")
 
     # --- 데이터 ---
     def _local_email(self, provider):
@@ -251,12 +261,13 @@ class RelayTray:
         self._local = ({} if error else
                        {p: self._local_email(p) for p in ("claude", "codex")})
         self._apply_live_usage()   # 현재 Claude 계정은 실시간 API 값으로 덮어씀
-        worst = None
+        used_worst = None
         for a in self._currents():
             w = _main_worst(a)
             if w is not None:
-                worst = w if worst is None else max(worst, w)
-        icon.icon = make_image(worst, bool(error))
+                used_worst = w if used_worst is None else max(used_worst, w)
+        remaining = None if used_worst is None else max(0, 100 - used_worst)
+        icon.icon = make_image(remaining, used_worst, bool(error))
         icon.title = self._tooltip()
         icon.menu = self._build_menu()
         icon.update_menu()
@@ -268,8 +279,8 @@ class RelayTray:
         if not cur:
             return "Relay — 로그인된 계정 감지 안 됨"
         parts = [f"{PROVIDER_LABEL[a['provider']]} {a.get('label')} "
-                 f"5h {_p(_pct(a.get('session_pct_used')))}·"
-                 f"7d {_p(_pct(a.get('weekly_pct_used')))}" for a in cur]
+                 f"5h {_pr(a.get('session_pct_used'))}·"
+                 f"7d {_pr(a.get('weekly_pct_used'))}" for a in cur]
         return "  |  ".join(parts)
 
     # --- 메뉴 ---
@@ -282,13 +293,13 @@ class RelayTray:
         return "⚪"
 
     def _acct_label(self, a, name):
-        s, w = _pct(a.get("session_pct_used")), _pct(a.get("weekly_pct_used"))
+        su, wu = a.get("session_pct_used"), a.get("weekly_pct_used")
         sc = _scoped_str(a)
         dot = self._marker(a)
         # 세션/주간 수집이 실패해도 Fable 등 있는 데이터는 그대로 보여준다
-        if a.get("error") and s is None and w is None and not sc:
+        if a.get("error") and su is None and wu is None and not sc:
             return f"{dot} {name} — 오류"
-        text = f"{dot} {name}   5h {_p(s)}  7d {_p(w)}"
+        text = f"{dot} {name}   5h {_pr(su)}  7d {_pr(wu)}"
         if sc:
             text += f"  · {sc}"
         if a.get("error"):
@@ -391,10 +402,11 @@ if __name__ == "__main__":
         print("error :", err)
         print("accounts:", json.dumps(accts, ensure_ascii=False, indent=2) if accts else None)
     elif "--render" in sys.argv:
-        for w, e, fn in [(5, False, "green"), (72, False, "yellow"),
-                         (95, False, "red"), (None, False, "none"),
-                         (None, True, "error")]:
-            make_image(w, e).save(f"/tmp/relay-icon-{fn}.png")
+        for used, e, fn in [(5, False, "green"), (72, False, "yellow"),
+                            (95, False, "red"), (None, False, "none"),
+                            (None, True, "error")]:
+            rem = None if used is None else 100 - used
+            make_image(rem, used, e).save(f"/tmp/relay-icon-{fn}.png")
         print("saved /tmp/relay-icon-*.png")
     else:
         lock = acquire_singleton()
