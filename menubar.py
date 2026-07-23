@@ -247,23 +247,28 @@ def fetch_live_codex_usage():
     if not result:
         return None
     rl = result.get("rateLimits") or {}
+    byid = result.get("rateLimitsByLimitId") or {}
     out = {"session_pct_used": None, "session_resets_at": None,
            "weekly_pct_used": None, "weekly_resets_at": None, "scoped": []}
+    # 세션(300분) 창
     for lim in (rl.get("primary"), rl.get("secondary")):
-        if not lim or lim.get("windowDurationMins") is None:
-            continue
-        dur, pct, reset = float(lim["windowDurationMins"]), lim.get("usedPercent"), _iso(lim.get("resetsAt"))
-        if dur == 300:
-            out["session_pct_used"], out["session_resets_at"] = pct, reset
-        elif dur == 10080:
-            out["weekly_pct_used"], out["weekly_resets_at"] = pct, reset
-    for lid, obj in (result.get("rateLimitsByLimitId") or {}).items():
+        if lim and lim.get("windowDurationMins") is not None and float(lim["windowDurationMins"]) == 300:
+            out["session_pct_used"] = lim.get("usedPercent")
+            out["session_resets_at"] = _iso(lim.get("resetsAt"))
+    # 주 모델 풀 → 'Sol' 로 추적 (Spark 미니 모델은 제외)
+    base = (byid.get("codex") or rl).get("primary") or {}
+    if base.get("usedPercent") is not None:
+        out["scoped"].append({"model": "Sol", "pct_used": base.get("usedPercent"),
+                              "resets_at": _iso(base.get("resetsAt"))})
+    for lid, obj in byid.items():
         if lid == "codex" or not isinstance(obj, dict):
             continue
+        name = obj.get("limitName") or lid
+        if "spark" in name.lower() or "spark" in lid.lower() or "bengalfox" in lid.lower():
+            continue  # Spark 미니 모델은 추적하지 않음
         prim = obj.get("primary") or {}
         if prim.get("usedPercent") is not None:
-            out["scoped"].append({"model": obj.get("limitName") or lid,
-                                  "pct_used": prim.get("usedPercent"),
+            out["scoped"].append({"model": name, "pct_used": prim.get("usedPercent"),
                                   "resets_at": _iso(prim.get("resetsAt"))})
     return out
 
@@ -375,9 +380,17 @@ class RelayTray:
         cur = self._currents()
         if not cur:
             return "Relay — 로그인된 계정 감지 안 됨"
-        parts = [f"{PROVIDER_LABEL[a['provider']]} {a.get('label')} "
-                 f"5h {_pr(a.get('session_pct_used'))}·"
-                 f"7d {_pr(a.get('weekly_pct_used'))}" for a in cur]
+        parts = []
+        for a in cur:
+            seg = [PROVIDER_LABEL[a["provider"]], a.get("label") or "?"]
+            if a.get("session_pct_used") is not None:
+                seg.append(f"5h {_pr(a['session_pct_used'])}")
+            if a.get("weekly_pct_used") is not None:
+                seg.append(f"7d {_pr(a['weekly_pct_used'])}")
+            sc = _scoped_str(a)
+            if sc:
+                seg.append(sc)
+            parts.append(" ".join(seg))
         return "  |  ".join(parts)
 
     # --- 메뉴 ---
@@ -405,9 +418,14 @@ class RelayTray:
         if a.get("error") and su is None and wu is None and not sc:
             return f"{dot} {name} — 오류"
         bar = self._bar(_rem(_main_worst(a)))   # 가장 빡센 창의 남은 양
-        text = f"{dot} {name}  {bar}  5h {_pr(su)}  7d {_pr(wu)}"
+        parts = []
+        if su is not None:
+            parts.append(f"5h {_pr(su)}")
+        if wu is not None:
+            parts.append(f"7d {_pr(wu)}")
         if sc:
-            text += f"  · {sc}"
+            parts.append(sc)
+        text = f"{dot} {name}  {bar}  {'  '.join(parts)}".rstrip()
         if a.get("error"):
             text += "  ⚠"
         return text
