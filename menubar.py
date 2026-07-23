@@ -76,6 +76,26 @@ def _pr(used):
     return f"{r}% 남" if r is not None else "-"
 
 
+def _reset(iso):
+    """초기화까지 남은 시간. '↻3h'·'↻2d'·'↻45m'·'↻곧'. 없으면 ''."""
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    secs = (dt - datetime.now(timezone.utc)).total_seconds()
+    if secs <= 0:
+        return "↻곧"
+    if secs < 3600:
+        return f"↻{int(secs // 60)}m"
+    if secs < 86400:
+        return f"↻{int(round(secs / 3600))}h"
+    return f"↻{int(round(secs / 86400))}d"
+
+
 def _main_worst(a):
     """아이콘/타이틀용 — 세션·주간·모델별(scoped) 중 가장 높은(빡센) %."""
     vals = [_pct(a.get("session_pct_used")), _pct(a.get("weekly_pct_used"))]
@@ -85,8 +105,8 @@ def _main_worst(a):
 
 
 def _scoped_str(a):
-    """모델별(scoped, 예: Fable) 남은 양 문자열. 없으면 ''."""
-    parts = [f"{s.get('model')} {_pr(s.get('pct_used'))}"
+    """모델별(scoped, 예: Fable·Sol) 남은 양 + 초기화 시각. 없으면 ''."""
+    parts = [f"{s.get('model')} {_pr(s.get('pct_used'))} {_reset(s.get('resets_at'))}".rstrip()
              for s in (a.get("scoped") or []) if s.get("pct_used") is not None]
     return "  ".join(parts)
 
@@ -420,9 +440,9 @@ class RelayTray:
         bar = self._bar(_rem(_main_worst(a)))   # 가장 빡센 창의 남은 양
         parts = []
         if su is not None:
-            parts.append(f"5h {_pr(su)}")
+            parts.append(f"5h {_pr(su)} {_reset(a.get('session_resets_at'))}".rstrip())
         if wu is not None:
-            parts.append(f"7d {_pr(wu)}")
+            parts.append(f"7d {_pr(wu)} {_reset(a.get('weekly_resets_at'))}".rstrip())
         if sc:
             parts.append(sc)
         text = f"{dot} {name}  {bar}  {'  '.join(parts)}".rstrip()
