@@ -29,7 +29,7 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import core  # noqa: E402
 
-REFRESH_SEC = 60
+REFRESH_SEC = 30  # 현재 계정은 로컬 토큰으로 실시간 추적 → 짧게
 SINGLETON_PORT = 53918  # 로컬 포트 바인딩으로 중복 실행 방지
 PROVIDER_LABEL = {"claude": "CLAUDE", "codex": "CODEX"}
 
@@ -116,6 +116,51 @@ def make_image(worst, error=False):
     return img
 
 
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+USAGE_HEADERS = {"User-Agent": "claude-cli/2.1.207 (external, cli)",
+                 "anthropic-beta": "oauth-2025-04-20"}
+
+
+def _parse_usage(data):
+    """usage API 응답 → {session/weekly pct·resets, scoped:[{model,pct,resets}]}."""
+    out = {"session_pct_used": None, "session_resets_at": None,
+           "weekly_pct_used": None, "weekly_resets_at": None, "scoped": []}
+    for lim in data.get("limits") or []:
+        kind, pct = lim.get("kind"), lim.get("percent")
+        if kind == "session":
+            out["session_pct_used"], out["session_resets_at"] = pct, lim.get("resets_at")
+        elif kind == "weekly_all":
+            out["weekly_pct_used"], out["weekly_resets_at"] = pct, lim.get("resets_at")
+        elif kind == "weekly_scoped":
+            model = ((lim.get("scope") or {}).get("model") or {}).get("display_name")
+            if model:
+                out["scoped"].append({"model": model, "pct_used": pct,
+                                      "resets_at": lim.get("resets_at")})
+    # limits 가 없던 구버전 응답 폴백
+    if out["session_pct_used"] is None and isinstance(data.get("five_hour"), dict):
+        out["session_pct_used"] = data["five_hour"].get("utilization")
+        out["session_resets_at"] = data["five_hour"].get("resets_at")
+    if out["weekly_pct_used"] is None and isinstance(data.get("seven_day"), dict):
+        out["weekly_pct_used"] = data["seven_day"].get("utilization")
+        out["weekly_resets_at"] = data["seven_day"].get("resets_at")
+    return out
+
+
+def fetch_live_claude_usage():
+    """이 맥의 현재 Claude 토큰으로 usage API 직접 호출 → 실시간 사용량. 실패 시 None."""
+    try:
+        blob = json.loads(core._read_claude_blob()).get("claudeAiOauth") or {}
+        token = blob.get("accessToken")
+        if not token:
+            return None
+        req = urllib.request.Request(
+            USAGE_URL, headers={"Authorization": f"Bearer {token}", **USAGE_HEADERS})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            return _parse_usage(json.load(r))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def acquire_singleton():
     """이미 실행 중이면 None. 아니면 잠금 소켓을 반환(계속 살려둬야 함)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -180,11 +225,32 @@ class RelayTray:
     def _currents(self):
         return [a for a in self._accounts if self._is_current(a)]
 
+    def _apply_live_usage(self):
+        """현재 사용 중인 Claude 계정의 잔량을 로컬 토큰 기반 실시간 API 값으로 교체.
+        (서버 스냅샷은 낡거나 수집 실패할 수 있음 → 현재 계정만이라도 정확하게.)"""
+        email = self._local.get("claude")
+        if not email:
+            return
+        live = fetch_live_claude_usage()
+        if not live:
+            return
+        for a in self._accounts:
+            if a.get("provider") == "claude" and (a.get("label") or "").strip().lower() == email:
+                a["session_pct_used"] = live["session_pct_used"]
+                a["session_resets_at"] = live["session_resets_at"]
+                a["weekly_pct_used"] = live["weekly_pct_used"]
+                a["weekly_resets_at"] = live["weekly_resets_at"]
+                a["scoped"] = live["scoped"]
+                a["error"] = None   # 실시간으로 갱신했으니 수집오류 표시 제거
+                a["_live"] = True
+                break
+
     def _refresh(self, icon):
         accounts, error = fetch_accounts()
         self._accounts, self._error = accounts or [], error
         self._local = ({} if error else
                        {p: self._local_email(p) for p in ("claude", "codex")})
+        self._apply_live_usage()   # 현재 Claude 계정은 실시간 API 값으로 덮어씀
         worst = None
         for a in self._currents():
             w = _main_worst(a)
@@ -245,7 +311,8 @@ class RelayTray:
         else:
             cur = self._currents()
             if cur:
-                items.append(pystray.MenuItem("현재 사용 중 (이 컴퓨터)", None, enabled=False))
+                live = " · 실시간" if any(a.get("_live") for a in cur) else ""
+                items.append(pystray.MenuItem(f"현재 사용 중 (이 컴퓨터{live})", None, enabled=False))
                 for a in cur:
                     items.append(pystray.MenuItem(
                         "  " + self._acct_label(a, a.get("label") or "?"), None, enabled=False))
