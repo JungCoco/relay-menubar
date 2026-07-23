@@ -13,12 +13,18 @@ pystray로 시스템 트레이(Windows)·메뉴바(macOS)에 동일하게 동작
 서버:  환경변수 POOL_SERVER (기본값은 core.py 참조)
 """
 import json
+import os
+import selectors
+import shutil
 import socket
+import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 import webbrowser
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
@@ -171,6 +177,97 @@ def fetch_live_claude_usage():
         return None
 
 
+def _iso(epoch):
+    if epoch is None:
+        return None
+    try:
+        return datetime.fromtimestamp(float(epoch), timezone.utc).isoformat()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _codex_bin():
+    """launchd의 최소 PATH에서도 codex 바이너리를 찾는다."""
+    for cand in (shutil.which("codex"), "/opt/homebrew/bin/codex",
+                 "/usr/local/bin/codex", os.path.expanduser("~/.local/bin/codex")):
+        if cand and os.path.exists(cand):
+            return cand
+    return "codex"
+
+
+def _codex_rate_limits():
+    """현재 ~/.codex 로그인으로 codex app-server JSON-RPC account/rateLimits/read 호출."""
+    proc = subprocess.Popen([_codex_bin(), "app-server"], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+    sel = selectors.DefaultSelector()
+    sel.register(proc.stdout, selectors.EVENT_READ)
+    try:
+        def send(obj):
+            proc.stdin.write((json.dumps(obj) + "\n").encode())
+            proc.stdin.flush()
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"clientInfo": {"name": "relay-menubar", "version": "1"}}})
+        time.sleep(0.4)
+        send({"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read", "params": {}})
+        pending, deadline = b"", time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if not sel.select(deadline - time.monotonic()):
+                break
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            pending += chunk
+            lines = pending.split(b"\n")
+            pending = lines.pop()
+            for line in lines:
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if msg.get("id") == 2:
+                    return None if msg.get("error") else msg.get("result")
+        return None
+    finally:
+        sel.close()
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+
+def fetch_live_codex_usage():
+    """이 맥의 현재 Codex 로그인으로 실시간 사용량. 세션(300분)·주간(10080분)·모델별. 실패 시 None."""
+    try:
+        result = _codex_rate_limits()
+    except Exception:  # noqa: BLE001
+        return None
+    if not result:
+        return None
+    rl = result.get("rateLimits") or {}
+    out = {"session_pct_used": None, "session_resets_at": None,
+           "weekly_pct_used": None, "weekly_resets_at": None, "scoped": []}
+    for lim in (rl.get("primary"), rl.get("secondary")):
+        if not lim or lim.get("windowDurationMins") is None:
+            continue
+        dur, pct, reset = float(lim["windowDurationMins"]), lim.get("usedPercent"), _iso(lim.get("resetsAt"))
+        if dur == 300:
+            out["session_pct_used"], out["session_resets_at"] = pct, reset
+        elif dur == 10080:
+            out["weekly_pct_used"], out["weekly_resets_at"] = pct, reset
+    for lid, obj in (result.get("rateLimitsByLimitId") or {}).items():
+        if lid == "codex" or not isinstance(obj, dict):
+            continue
+        prim = obj.get("primary") or {}
+        if prim.get("usedPercent") is not None:
+            out["scoped"].append({"model": obj.get("limitName") or lid,
+                                  "pct_used": prim.get("usedPercent"),
+                                  "resets_at": _iso(prim.get("resetsAt"))})
+    return out
+
+
 def acquire_singleton():
     """이미 실행 중이면 None. 아니면 잠금 소켓을 반환(계속 살려둬야 함)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -236,24 +333,24 @@ class RelayTray:
         return [a for a in self._accounts if self._is_current(a)]
 
     def _apply_live_usage(self):
-        """현재 사용 중인 Claude 계정의 잔량을 로컬 토큰 기반 실시간 API 값으로 교체.
+        """현재 사용 중인 계정(Claude·Codex)의 잔량을 이 컴퓨터의 로컬 실시간 값으로 교체.
         (서버 스냅샷은 낡거나 수집 실패할 수 있음 → 현재 계정만이라도 정확하게.)"""
-        email = self._local.get("claude")
-        if not email:
-            return
-        live = fetch_live_claude_usage()
-        if not live:
-            return
-        for a in self._accounts:
-            if a.get("provider") == "claude" and (a.get("label") or "").strip().lower() == email:
-                a["session_pct_used"] = live["session_pct_used"]
-                a["session_resets_at"] = live["session_resets_at"]
-                a["weekly_pct_used"] = live["weekly_pct_used"]
-                a["weekly_resets_at"] = live["weekly_resets_at"]
-                a["scoped"] = live["scoped"]
-                a["error"] = None   # 실시간으로 갱신했으니 수집오류 표시 제거
-                a["_live"] = True
-                break
+        for provider, fetch in (("claude", fetch_live_claude_usage),
+                                ("codex", fetch_live_codex_usage)):
+            email = self._local.get(provider)
+            if not email:
+                continue
+            live = fetch()
+            if not live:
+                continue
+            for a in self._accounts:
+                if a.get("provider") == provider and (a.get("label") or "").strip().lower() == email:
+                    for k in ("session_pct_used", "session_resets_at", "weekly_pct_used",
+                              "weekly_resets_at", "scoped"):
+                        a[k] = live[k]
+                    a["error"] = None   # 실시간으로 갱신했으니 수집오류 표시 제거
+                    a["_live"] = True
+                    break
 
     def _refresh(self, icon):
         accounts, error = fetch_accounts()
@@ -292,6 +389,14 @@ class RelayTray:
             return "🟢"
         return "⚪"
 
+    @staticmethod
+    def _bar(remaining, width=10):
+        """남은 양 진행바. 채워진 칸 = 남은 %."""
+        if remaining is None:
+            return "─" * width
+        filled = round(remaining / 100 * width)
+        return "█" * filled + "░" * (width - filled)
+
     def _acct_label(self, a, name):
         su, wu = a.get("session_pct_used"), a.get("weekly_pct_used")
         sc = _scoped_str(a)
@@ -299,7 +404,8 @@ class RelayTray:
         # 세션/주간 수집이 실패해도 Fable 등 있는 데이터는 그대로 보여준다
         if a.get("error") and su is None and wu is None and not sc:
             return f"{dot} {name} — 오류"
-        text = f"{dot} {name}   5h {_pr(su)}  7d {_pr(wu)}"
+        bar = self._bar(_rem(_main_worst(a)))   # 가장 빡센 창의 남은 양
+        text = f"{dot} {name}  {bar}  5h {_pr(su)}  7d {_pr(wu)}"
         if sc:
             text += f"  · {sc}"
         if a.get("error"):

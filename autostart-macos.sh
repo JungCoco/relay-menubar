@@ -16,6 +16,8 @@ cat > "$PLIST" <<PLISTEOF
     <string>$PY</string>
     <string>$ROOT/menubar.py</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>StandardOutPath</key><string>/tmp/relay-menubar.log</string>
