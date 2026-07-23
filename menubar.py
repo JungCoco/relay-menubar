@@ -153,19 +153,44 @@ class RelayTray:
     def __init__(self, lock=None):
         self._lock = lock  # 싱글턴 소켓 — GC로 닫히지 않게 참조 유지
         self._accounts = []
+        self._local = {}   # 이 컴퓨터에 실제 로그인된 provider별 이메일
         self._error = None
         self._stop = threading.Event()
         self._icon = pystray.Icon("Relay", make_image(None), "Relay")
 
     # --- 데이터 ---
-    def _current(self):
-        return next((a for a in self._accounts if a.get("is_current")), None)
+    def _local_email(self, provider):
+        """이 컴퓨터에 실제 로그인된 provider 계정의 이메일. 감지 실패 시 None.
+        claude=키체인, codex=~/.codex/auth.json 기준(= plain CLI가 실제 쓰는 계정)."""
+        try:
+            _, email = core.capture_claude() if provider == "claude" else core.capture_codex()
+        except Exception:  # noqa: BLE001
+            return None
+        if not email or email.startswith("새 "):
+            return None
+        return email.strip().lower()
+
+    def _is_current(self, a):
+        """서버 선택이 아니라 '이 컴퓨터에서 실제 사용 중'인지로 판단."""
+        email = self._local.get(a.get("provider"))
+        if email:
+            return (a.get("label") or "").strip().lower() == email
+        return bool(a.get("is_current"))  # 로컬 감지 실패 시에만 서버값 폴백
+
+    def _currents(self):
+        return [a for a in self._accounts if self._is_current(a)]
 
     def _refresh(self, icon):
         accounts, error = fetch_accounts()
         self._accounts, self._error = accounts or [], error
-        cur = self._current()
-        icon.icon = make_image(_main_worst(cur) if cur else None, bool(error))
+        self._local = ({} if error else
+                       {p: self._local_email(p) for p in ("claude", "codex")})
+        worst = None
+        for a in self._currents():
+            w = _main_worst(a)
+            if w is not None:
+                worst = w if worst is None else max(worst, w)
+        icon.icon = make_image(worst, bool(error))
         icon.title = self._tooltip()
         icon.menu = self._build_menu()
         icon.update_menu()
@@ -173,14 +198,13 @@ class RelayTray:
     def _tooltip(self):
         if self._error:
             return f"Relay — {self._error}"
-        cur = self._current()
+        cur = self._currents()
         if not cur:
-            return "Relay — 선택된 계정 없음"
-        text = (f"{cur.get('label') or '?'}  "
-                f"5h {_p(_pct(cur.get('session_pct_used')))} · "
-                f"7d {_p(_pct(cur.get('weekly_pct_used')))}")
-        sc = _scoped_str(cur)
-        return f"{text} · {sc}" if sc else text
+            return "Relay — 로그인된 계정 감지 안 됨"
+        parts = [f"{PROVIDER_LABEL[a['provider']]} {a.get('label')} "
+                 f"5h {_p(_pct(a.get('session_pct_used')))}·"
+                 f"7d {_p(_pct(a.get('weekly_pct_used')))}" for a in cur]
+        return "  |  ".join(parts)
 
     # --- 메뉴 ---
     def _acct_label(self, a, name):
@@ -198,7 +222,7 @@ class RelayTray:
 
     def _account_item(self, provider, a):
         name = a.get("label") or a.get("account_name") or "?"
-        is_cur = bool(a.get("is_current"))
+        is_cur = self._is_current(a)
         action = None if is_cur else partial(self._on_switch, provider, a.get("id"), name)
         return pystray.MenuItem(self._acct_label(a, name), action,
                                 checked=lambda _i, c=is_cur: c, enabled=not is_cur)
@@ -211,12 +235,14 @@ class RelayTray:
                 items.append(pystray.MenuItem("Relay 데스크톱 앱에서 로그인하세요",
                                               None, enabled=False))
         else:
-            cur = self._current()
-            head = (f"현재: {cur.get('label') or '?'}" if cur else "선택된 계정 없음")
-            items.append(pystray.MenuItem(head, None, enabled=False))
+            cur = self._currents()
             if cur:
-                items.append(pystray.MenuItem("   " + self._tooltip().split("  ", 1)[-1],
-                                              None, enabled=False))
+                items.append(pystray.MenuItem("현재 사용 중 (이 컴퓨터)", None, enabled=False))
+                for a in cur:
+                    items.append(pystray.MenuItem(
+                        "  " + self._acct_label(a, a.get("label") or "?"), None, enabled=False))
+            else:
+                items.append(pystray.MenuItem("로그인된 계정 감지 안 됨", None, enabled=False))
             for provider in ("claude", "codex"):
                 group = [a for a in self._accounts if a.get("provider") == provider]
                 if not group:
