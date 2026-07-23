@@ -35,7 +35,11 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import core  # noqa: E402
 
-REFRESH_SEC = 30  # 현재 계정은 로컬 토큰으로 실시간 추적 → 짧게
+REFRESH_SEC = 60          # 메뉴/아이콘 갱신 주기
+USAGE_MIN_INTERVAL = 55   # usage API 최소 재조회 간격(초) — rate limit 회피
+USAGE_BACKOFF_START = 120  # 429 등 실패 후 첫 백오프(초)
+USAGE_BACKOFF_MAX = 900    # 백오프 상한(초)
+USAGE_CACHE_TTL = 1800     # 캐시된 라이브 값 유효(초). 넘으면 서버 스냅샷 허용
 SINGLETON_PORT = 53918  # 로컬 포트 바인딩으로 중복 실행 방지
 PROVIDER_LABEL = {"claude": "CLAUDE", "codex": "CODEX"}
 
@@ -332,20 +336,44 @@ class RelayTray:
         self._accounts = []
         self._local = {}   # 이 컴퓨터에 실제 로그인된 provider별 이메일
         self._error = None
+        self._email_cache = {}       # provider -> email (sticky)
+        self._claude_blob_hash = None
+        self._usage_cache = {}       # provider -> {"data", "ts"(monotonic)}
+        self._usage_next = {}        # provider -> 다음 조회 허용 시각(monotonic)
+        self._usage_backoff = {}     # provider -> 현재 백오프(초)
         self._stop = threading.Event()
         self._icon = pystray.Icon("Relay", make_image(None, None), "Relay")
 
     # --- 데이터 ---
     def _local_email(self, provider):
-        """이 컴퓨터에 실제 로그인된 provider 계정의 이메일. 감지 실패 시 None.
-        claude=키체인, codex=~/.codex/auth.json 기준(= plain CLI가 실제 쓰는 계정)."""
+        """이 컴퓨터의 현재 로그인 계정 이메일 (sticky 캐시).
+        codex=로컬 JWT 디코드(무네트워크). claude=키체인 블롭이 바뀔 때만 profile API
+        호출(매 주기 호출하면 rate limit 유발). 감지 실패 시 직전 캐시 유지."""
+        if provider == "codex":
+            try:
+                _, email = core.capture_codex()
+            except Exception:  # noqa: BLE001
+                email = None
+            if email and not email.startswith("새 "):
+                self._email_cache["codex"] = email.strip().lower()
+            return self._email_cache.get("codex")
+        # claude
         try:
-            _, email = core.capture_claude() if provider == "claude" else core.capture_codex()
+            blob = core._read_claude_blob()
         except Exception:  # noqa: BLE001
-            return None
-        if not email or email.startswith("새 "):
-            return None
-        return email.strip().lower()
+            return self._email_cache.get("claude")
+        digest = hash(blob)
+        if digest == self._claude_blob_hash and self._email_cache.get("claude"):
+            return self._email_cache["claude"]   # 계정 그대로 → 네트워크 생략
+        try:
+            token = json.loads(blob).get("claudeAiOauth", {}).get("accessToken")
+            email = core._claude_email(token)
+        except Exception:  # noqa: BLE001
+            email = None
+        if email:
+            self._email_cache["claude"] = email.strip().lower()
+            self._claude_blob_hash = digest
+        return self._email_cache.get("claude")
 
     def _is_current(self, a):
         """서버 선택이 아니라 '이 컴퓨터에서 실제 사용 중'인지로 판단."""
@@ -359,21 +387,35 @@ class RelayTray:
 
     def _apply_live_usage(self):
         """현재 사용 중인 계정(Claude·Codex)의 잔량을 이 컴퓨터의 로컬 실시간 값으로 교체.
-        (서버 스냅샷은 낡거나 수집 실패할 수 있음 → 현재 계정만이라도 정확하게.)"""
-        for provider, fetch in (("claude", fetch_live_claude_usage),
-                                ("codex", fetch_live_codex_usage)):
+        rate limit(429) 대비: 최소 간격/백오프로 조회하고, 실패해도 낡은 서버 스냅샷으로
+        되돌아가 숫자가 튀지 않게 '마지막 성공 라이브 값'을 캐시에서 계속 쓴다."""
+        fetchers = {"claude": fetch_live_claude_usage, "codex": fetch_live_codex_usage}
+        now = time.monotonic()
+        for provider, fetch in fetchers.items():
             email = self._local.get(provider)
             if not email:
                 continue
-            live = fetch()
-            if not live:
-                continue
+            fresh = None
+            if now >= self._usage_next.get(provider, 0):
+                fresh = fetch()
+                if fresh:
+                    self._usage_cache[provider] = {"data": fresh, "ts": now}
+                    self._usage_next[provider] = now + USAGE_MIN_INTERVAL
+                    self._usage_backoff[provider] = USAGE_BACKOFF_START
+                else:  # 대개 429 → 점점 더 길게 쉰다 (그동안 캐시 값 사용)
+                    backoff = self._usage_backoff.get(provider, USAGE_BACKOFF_START)
+                    self._usage_next[provider] = now + backoff
+                    self._usage_backoff[provider] = min(backoff * 2, USAGE_BACKOFF_MAX)
+            cached = self._usage_cache.get(provider)
+            use = fresh or (cached["data"] if cached and now - cached["ts"] < USAGE_CACHE_TTL else None)
+            if not use:
+                continue   # 라이브 값 없음 → 서버 스냅샷 그대로 둠
             for a in self._accounts:
                 if a.get("provider") == provider and (a.get("label") or "").strip().lower() == email:
                     for k in ("session_pct_used", "session_resets_at", "weekly_pct_used",
                               "weekly_resets_at", "scoped"):
-                        a[k] = live[k]
-                    a["error"] = None   # 실시간으로 갱신했으니 수집오류 표시 제거
+                        a[k] = use[k]
+                    a["error"] = None
                     a["_live"] = True
                     break
 
