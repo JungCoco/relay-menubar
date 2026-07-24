@@ -12,6 +12,7 @@ pystray로 시스템 트레이(Windows)·메뉴바(macOS)에 동일하게 동작
 인증:  ~/.account-pool/session (Relay 데스크톱 앱에서 로그인하면 생성)
 서버:  환경변수 POOL_SERVER (기본값은 core.py 참조)
 """
+import base64
 import json
 import os
 import selectors
@@ -71,8 +72,17 @@ def _p(v):
 
 
 def _rem(used):
-    """사용률 → 남은 %. (표시는 '남은 양' 기준)"""
-    return None if used is None else max(0, 100 - int(round(float(used))))
+    """사용률 → 남은 %. 경계 뭉갬 방지: 조금이라도 썼으면 100 안 뜨고,
+    완전 소진 전엔 0 안 뜨게 한다(소량 사용/거의 소진을 정확히 구분)."""
+    if used is None:
+        return None
+    u = float(used)
+    r = max(0, min(100, 100 - int(round(u))))
+    if u > 0 and r == 100:
+        return 99
+    if u < 100 and r == 0:
+        return 1
+    return r
 
 
 def _pr(used):
@@ -92,7 +102,8 @@ def _reset(iso):
         dt = dt.replace(tzinfo=timezone.utc)
     secs = (dt - datetime.now(timezone.utc)).total_seconds()
     if secs <= 0:
-        return "↻곧"
+        # 방금 지난 건 '↻곧', 한참 지난(낡은 스냅샷) 시각은 오신호이므로 숨김
+        return "↻곧" if secs > -300 else ""
     if secs < 3600:
         return f"↻{int(secs // 60)}m"
     if secs < 86400:
@@ -219,10 +230,39 @@ def _codex_bin():
     return "codex"
 
 
-def _codex_rate_limits():
-    """현재 ~/.codex 로그인으로 codex app-server JSON-RPC account/rateLimits/read 호출."""
+def _selected_codex_home():
+    """Relay가 전환한 codex 계정의 격리 홈(~/.account-pool/codex/<id>). 선택 없으면
+    None(= 기본 ~/.codex). dir 생성 부작용 없이 경로만 확인한다."""
+    try:
+        sel = core.current("codex")
+        if not sel:
+            return None
+        home = core.STATE_DIR / "codex" / str(sel["account_id"])
+        return str(home) if (home / "auth.json").exists() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _codex_email_from(home):
+    """codex auth.json(id_token JWT)에서 이메일. home=None이면 ~/.codex. 실패 시 None."""
+    path = (Path(home) if home else Path(os.path.expanduser("~/.codex"))) / "auth.json"
+    try:
+        auth = json.loads(path.read_text(encoding="utf-8"))
+        payload = auth.get("tokens", {}).get("id_token", "").split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload)).get("email")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _codex_rate_limits(home=None):
+    """codex app-server JSON-RPC account/rateLimits/read 호출.
+    home 지정 시 CODEX_HOME 으로 그 계정(=Relay 선택) 기준 사용량을 읽는다."""
+    env = os.environ.copy()
+    if home:
+        env["CODEX_HOME"] = home
     proc = subprocess.Popen([_codex_bin(), "app-server"], stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0, env=env)
     sel = selectors.DefaultSelector()
     sel.register(proc.stdout, selectors.EVENT_READ)
     try:
@@ -263,9 +303,10 @@ def _codex_rate_limits():
 
 
 def fetch_live_codex_usage():
-    """이 맥의 현재 Codex 로그인으로 실시간 사용량. 세션(300분)·주간(10080분)·모델별. 실패 시 None."""
+    """현재 Codex 계정(Relay 선택 홈 또는 ~/.codex)으로 실시간 사용량.
+    짧은 창=세션, 주 모델 풀=Sol(Spark 제외). 실패 시 None."""
     try:
-        result = _codex_rate_limits()
+        result = _codex_rate_limits(_selected_codex_home())
     except Exception:  # noqa: BLE001
         return None
     if not result:
@@ -274,9 +315,9 @@ def fetch_live_codex_usage():
     byid = result.get("rateLimitsByLimitId") or {}
     out = {"session_pct_used": None, "session_resets_at": None,
            "weekly_pct_used": None, "weekly_resets_at": None, "scoped": []}
-    # 세션(300분) 창
+    # 세션 창(~5h 이하). 300분 하드코딩 대신 창 길이 범위로 견고하게.
     for lim in (rl.get("primary"), rl.get("secondary")):
-        if lim and lim.get("windowDurationMins") is not None and float(lim["windowDurationMins"]) == 300:
+        if lim and lim.get("usedPercent") is not None and 0 < float(lim.get("windowDurationMins") or 0) <= 360:
             out["session_pct_used"] = lim.get("usedPercent")
             out["session_resets_at"] = _iso(lim.get("resetsAt"))
     # 주 모델 풀 → 'Sol' 로 추적 (Spark 미니 모델은 제외)
@@ -338,9 +379,10 @@ class RelayTray:
         self._error = None
         self._email_cache = {}       # provider -> email (sticky)
         self._claude_blob_hash = None
-        self._usage_cache = {}       # provider -> {"data", "ts"(monotonic)}
-        self._usage_next = {}        # provider -> 다음 조회 허용 시각(monotonic)
-        self._usage_backoff = {}     # provider -> 현재 백오프(초)
+        self._usage_cache = {}       # (provider,email) -> {"data", "ts"(monotonic)}
+        self._usage_next = {}        # (provider,email) -> 다음 조회 허용 시각(monotonic)
+        self._usage_backoff = {}     # (provider,email) -> 현재 백오프(초)
+        self._force_provider = None  # 전환 직후 1회 강제 재조회할 provider
         self._stop = threading.Event()
         self._icon = pystray.Icon("Relay", make_image(None, None), "Relay")
 
@@ -350,21 +392,21 @@ class RelayTray:
         codex=로컬 JWT 디코드(무네트워크). claude=키체인 블롭이 바뀔 때만 profile API
         호출(매 주기 호출하면 rate limit 유발). 감지 실패 시 직전 캐시 유지."""
         if provider == "codex":
-            try:
-                _, email = core.capture_codex()
-            except Exception:  # noqa: BLE001
-                email = None
-            if email and not email.startswith("새 "):
+            # Relay 선택 홈(전환 대상) 기준으로 판정 — capture_codex는 항상 ~/.codex라 부정확
+            email = _codex_email_from(_selected_codex_home())
+            if email:
                 self._email_cache["codex"] = email.strip().lower()
             return self._email_cache.get("codex")
         # claude
         try:
             blob = core._read_claude_blob()
         except Exception:  # noqa: BLE001
-            return self._email_cache.get("claude")
+            return self._email_cache.get("claude")   # 블롭 못 읽음(일시 오류) → 직전 캐시 유지
         digest = hash(blob)
         if digest == self._claude_blob_hash and self._email_cache.get("claude"):
             return self._email_cache["claude"]   # 계정 그대로 → 네트워크 생략
+        # 여기 도달 = 블롭이 바뀐(전환) 상태. 옛 이메일을 신뢰하면 안 됨 → 먼저 무효화.
+        self._email_cache.pop("claude", None)
         try:
             token = json.loads(blob).get("claudeAiOauth", {}).get("accessToken")
             email = core._claude_email(token)
@@ -372,7 +414,9 @@ class RelayTray:
             email = None
         if email:
             self._email_cache["claude"] = email.strip().lower()
-            self._claude_blob_hash = digest
+            self._claude_blob_hash = digest   # 성공 시에만 갱신 → 실패 지속 시 매 주기 재시도
+        else:
+            self._claude_blob_hash = None      # 새 이메일 못 얻음 → None 반환(서버값 폴백)
         return self._email_cache.get("claude")
 
     def _is_current(self, a):
@@ -391,33 +435,35 @@ class RelayTray:
         되돌아가 숫자가 튀지 않게 '마지막 성공 라이브 값'을 캐시에서 계속 쓴다."""
         fetchers = {"claude": fetch_live_claude_usage, "codex": fetch_live_codex_usage}
         now = time.monotonic()
+        forced = self._force_provider
+        self._force_provider = None   # 1회 소비
         for provider, fetch in fetchers.items():
             email = self._local.get(provider)
             if not email:
                 continue
+            key = (provider, email)   # 계정별 캐시 — 전환 후 옛 계정 값이 새 계정에 새지 않게
             fresh = None
-            if now >= self._usage_next.get(provider, 0):
+            if now >= self._usage_next.get(key, 0) or provider == forced:
                 fresh = fetch()
                 if fresh:
-                    self._usage_cache[provider] = {"data": fresh, "ts": now}
-                    self._usage_next[provider] = now + USAGE_MIN_INTERVAL
-                    self._usage_backoff[provider] = USAGE_BACKOFF_START
-                else:  # 대개 429 → 점점 더 길게 쉰다 (그동안 캐시 값 사용)
-                    backoff = self._usage_backoff.get(provider, USAGE_BACKOFF_START)
-                    self._usage_next[provider] = now + backoff
-                    self._usage_backoff[provider] = min(backoff * 2, USAGE_BACKOFF_MAX)
-            cached = self._usage_cache.get(provider)
+                    self._usage_cache[key] = {"data": fresh, "ts": now}
+                    self._usage_next[key] = now + USAGE_MIN_INTERVAL
+                    self._usage_backoff[key] = USAGE_BACKOFF_START
+                else:  # 대개 429 → 점점 더 길게 쉰다 (그동안 이 계정의 캐시 값 사용)
+                    backoff = self._usage_backoff.get(key, USAGE_BACKOFF_START)
+                    self._usage_next[key] = now + backoff
+                    self._usage_backoff[key] = min(backoff * 2, USAGE_BACKOFF_MAX)
+            cached = self._usage_cache.get(key)
             use = fresh or (cached["data"] if cached and now - cached["ts"] < USAGE_CACHE_TTL else None)
             if not use:
-                continue   # 라이브 값 없음 → 서버 스냅샷 그대로 둠
-            for a in self._accounts:
+                continue   # 이 계정의 라이브 값 없음 → 서버 스냅샷 그대로 둠
+            for a in self._accounts:   # 같은 이메일 계정이 여러 개여도 전부 같은 값으로 (break 없음)
                 if a.get("provider") == provider and (a.get("label") or "").strip().lower() == email:
                     for k in ("session_pct_used", "session_resets_at", "weekly_pct_used",
                               "weekly_resets_at", "scoped"):
                         a[k] = use[k]
                     a["error"] = None
                     a["_live"] = True
-                    break
 
     def _refresh(self, icon):
         accounts, error = fetch_accounts()
@@ -535,6 +581,7 @@ class RelayTray:
         try:
             core.select(provider, int(account_id), name or "")
             core.apply(provider)
+            self._force_provider = provider   # 전환 직후 백오프 무시하고 새 계정 즉시 조회
             self._notify(icon, f"{name} 로 전환됨")
         except urllib.error.HTTPError as e:
             if e.code >= 500:
