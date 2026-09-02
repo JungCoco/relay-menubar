@@ -47,12 +47,13 @@ CODEX
 
 ## 설치
 
-**공통** — Python 3.9+ 필요.
+**공통** — Python 3.11+ 필요 (macOS: `brew install python@3.13` 권장 — Xcode/시스템 Python은
+Xcode 업데이트 시 venv가 깨질 수 있다).
 
 ```bash
 git clone https://github.com/JungCoco/relay-menubar
 cd relay-menubar
-python3 -m venv .venv                       # (Windows: py -m venv .venv)
+python3.13 -m venv .venv                    # (Windows: py -3.13 -m venv .venv)
 ./.venv/bin/pip install -r requirements.txt  # (Windows: .venv\Scripts\pip install -r requirements.txt)
 ```
 

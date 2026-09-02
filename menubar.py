@@ -95,7 +95,7 @@ def _reset(iso):
     if not iso:
         return ""
     try:
-        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(iso))
     except ValueError:
         return ""
     if dt.tzinfo is None:
@@ -168,7 +168,7 @@ def make_image(remaining, used_worst=None, error=False):
 
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-USAGE_HEADERS = {"User-Agent": "claude-cli/2.1.207 (external, cli)",
+USAGE_HEADERS = {"User-Agent": core.CLAUDE_UA,
                  "anthropic-beta": "oauth-2025-04-20"}
 
 

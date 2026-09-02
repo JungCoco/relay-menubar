@@ -1,7 +1,6 @@
-# 크로스플랫폼 트레이/메뉴바 (Windows·macOS·Linux 공통)
+# 크로스플랫폼 트레이/메뉴바 (Windows·macOS·Linux 공통) — Python 3.11+
 pystray>=0.19
-Pillow>=10
+Pillow>=12
 # macOS 전용: pystray가 pyobjc(Cocoa/Quartz)에 의존.
-# 시스템 Python 3.9 에서 12.x 는 소스빌드 실패 → 3.9 휠이 있는 11.x 로 고정.
-pyobjc-framework-Cocoa<12 ; sys_platform == "darwin"
-pyobjc-framework-Quartz<12 ; sys_platform == "darwin"
+pyobjc-framework-Cocoa>=12 ; sys_platform == "darwin"
+pyobjc-framework-Quartz>=12 ; sys_platform == "darwin"

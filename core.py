@@ -70,6 +70,8 @@ def _auth_headers():
 CLAUDE_SCOPES = ["user:inference", "user:profile", "user:mcp_servers",
                  "user:file_upload", "user:sessions:claude_code"]
 CLAUDE_KC_SERVICE = "Claude Code-credentials"
+# oauth profile/usage API용 User-Agent — 설치된 CLI 버전과 느슨하게 동기화해 한 곳에서 관리
+CLAUDE_UA = "claude-cli/2.1.183 (external, cli)"
 
 
 def _state_file(provider):
@@ -186,7 +188,7 @@ def _claude_email(access_token):
             "https://api.anthropic.com/api/oauth/profile",
             headers={"Authorization": f"Bearer {access_token}",
                      "anthropic-beta": "oauth-2025-04-20",
-                     "User-Agent": "claude-cli/2.1.179 (external, cli)"},
+                     "User-Agent": CLAUDE_UA},
         )
         with urllib.request.urlopen(req, timeout=12) as r:
             acc = json.load(r).get("account", {})
