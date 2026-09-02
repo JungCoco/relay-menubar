@@ -35,6 +35,10 @@ CODEX
     성공 라이브 값을 유지**해 숫자가 낡은 스냅샷으로 튀지 않는다. 이메일 감지도
     계정이 바뀔 때만 호출.
 - **나머지 계정**은 풀 서버가 수집한 스냅샷을 사용(다소 지연될 수 있음).
+- **캡처백**: 로컬 CLI가 refresh 토큰을 회전시키면 위젯이 감지해 서버 저장본을
+  갱신한다(`POST /accounts/<id>/credential`, 풀에 있는 계정만). 서버 collector와
+  로컬 CLI가 같은 토큰을 각자 회전시켜 서버본이 무효화되는 사고를 막는다.
+  구버전 서버(엔드포인트 없음)에서는 조용히 건너뛴다.
 - 표시되는 모든 %는 **남은 양**이다(`79% 남` = 79% 남음). 아이콘 숫자도 남은 %.
 - 계정 앞 색 원: 🟢 사용 중 · 🔴 거의 소진(10% 이하 남음) · ⚪ 여유.
 
@@ -97,13 +101,16 @@ python3.13 -m venv .venv                    # (Windows: py -3.13 -m venv .venv)
 - `core.py` — 전환 코어(세션·서버 통신·select·apply). relay-account-pool에서 벤더링.
 - `relay-menubar` / `relay-menubar.cmd` — mac·linux / windows 런처
 - `autostart-macos.sh` / `autostart-windows.cmd` — 로그인 자동 실행 등록
+- `make-app-macos.sh` — 더블클릭용 `~/Applications/Relay.app` 생성(venv 참조 경량 래퍼)
+- `sync-core.sh` — `core.py` 벤더링 드리프트 확인/동기화(원본 = relay-account-pool)
 - `brand/` — 앱 아이콘: `icon.svg`(원본) · `Relay.icns`(mac) · `icon.ico`(win) · `icon-1024.png`
 
 ## 로드맵
 
 - [x] 브랜드 로고 앱 아이콘 (`brand/`)
 - [x] 로그인 시 자동 실행 (mac LaunchAgent / win 시작 프로그램)
-- [ ] 더블클릭 배포 번들 (mac `.app` / win `.exe`) — `brand/Relay.icns`·`brand/icon.ico` 사용
+- [x] mac 더블클릭 번들 — `./make-app-macos.sh` → `~/Applications/Relay.app`
+- [ ] win 더블클릭 `.exe` — relay-account-pool의 GitHub Actions exe 빌드 패턴 이식
 
 ---
 

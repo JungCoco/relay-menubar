@@ -239,6 +239,20 @@ def register(provider, label, credential):
         return json.load(r)
 
 
+def push_credential(account_id, credential):
+    """캡처백: 로컬에서 회전된 자격증명을 서버 저장본에 반영.
+    (POST /accounts/<id>/credential — 서버가 신선도를 판정해 더 새로울 때만 갱신)"""
+    data = json.dumps({"credential": credential}).encode()
+    headers = _auth_headers()
+    headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(
+        f"{SERVER}/accounts/{int(account_id)}/credential",
+        data=data, headers=headers, method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.load(r)
+
+
 def add_current(provider):
     """현재 로그인된 계정을 캡처해 서버에 등록. (결과, label) 반환."""
     cred, label = capture_claude() if provider == "claude" else capture_codex()

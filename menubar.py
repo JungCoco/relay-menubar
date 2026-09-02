@@ -383,6 +383,9 @@ class RelayTray:
         self._usage_next = {}        # (provider,email) -> 다음 조회 허용 시각(monotonic)
         self._usage_backoff = {}     # (provider,email) -> 현재 백오프(초)
         self._force_provider = None  # 전환 직후 1회 강제 재조회할 provider
+        self._applied_hash = {}      # provider -> 전환 시 우리가 쓴 자격증명 해시(캡처백 제외용)
+        self._captured_hash = {}     # provider -> 마지막으로 서버에 캡처백한 자격증명 해시
+        self._capture_next = {}      # provider -> 캡처백 실패 후 재시도 허용 시각(monotonic)
         self._stop = threading.Event()
         self._icon = pystray.Icon("Relay", make_image(None, None), "Relay")
 
@@ -418,6 +421,58 @@ class RelayTray:
         else:
             self._claude_blob_hash = None      # 새 이메일 못 얻음 → None 반환(서버값 폴백)
         return self._email_cache.get("claude")
+
+    def _local_blob(self, provider):
+        """이 컴퓨터의 현재 로컬 자격증명 원본 문자열. 없으면 None."""
+        try:
+            if provider == "claude":
+                return core._read_claude_blob()
+            home = _selected_codex_home()
+            path = (Path(home) if home else Path(os.path.expanduser("~/.codex"))) / "auth.json"
+            return path.read_text(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _maybe_capture_back(self):
+        """로컬 CLI가 회전시킨 자격증명을 풀 서버에 재등록(캡처백).
+        서버 collector와 로컬 CLI가 같은 refresh 토큰을 각자 회전시키면 서버
+        저장본이 무효화될 수 있다 → 로컬 회전을 감지해 서버로 되민다.
+        풀에 이미 있는 계정(label 일치)만 대상 — 개인 계정 자동 등록 방지."""
+        now = time.monotonic()
+        for provider in ("claude", "codex"):
+            email = self._local.get(provider)
+            if not email or now < self._capture_next.get(provider, 0):
+                continue
+            match = next((a for a in self._accounts
+                          if a.get("provider") == provider
+                          and (a.get("label") or "").strip().lower() == email), None)
+            if not match:
+                continue
+            blob = self._local_blob(provider)
+            if not blob:
+                continue
+            digest = hash(blob)
+            if digest in (self._applied_hash.get(provider), self._captured_hash.get(provider)):
+                continue   # 우리가 방금 적용한 값이거나 이미 보낸 값 → 회전 아님
+            try:
+                if provider == "claude":
+                    o = json.loads(blob)["claudeAiOauth"]
+                    if not o.get("refreshToken"):
+                        continue
+                    cred = {"refresh_token": o["refreshToken"],
+                            "access_token": o.get("accessToken"),
+                            "expires_at_ms": o.get("expiresAt")}
+                else:
+                    cred = {"auth_json": json.loads(blob)}
+                core.push_credential(match["id"], cred)
+                self._captured_hash[provider] = digest
+            except urllib.error.HTTPError as e:
+                if e.code in (403, 404, 405):   # 엔드포인트 미배포/미허가 서버 → 오래 쉼
+                    self._capture_next[provider] = now + 3600
+                else:
+                    self._capture_next[provider] = now + 300
+            except Exception:  # noqa: BLE001 - 서버 불통 등. 잠시 쉬었다 재시도
+                self._capture_next[provider] = now + 300
 
     def _is_current(self, a):
         """서버 선택이 아니라 '이 컴퓨터에서 실제 사용 중'인지로 판단."""
@@ -470,6 +525,7 @@ class RelayTray:
         self._accounts, self._error = accounts or [], error
         self._local = ({} if error else
                        {p: self._local_email(p) for p in ("claude", "codex")})
+        self._maybe_capture_back()   # 로컬 회전 자격증명 → 서버 되밀기
         self._apply_live_usage()   # 현재 Claude 계정은 실시간 API 값으로 덮어씀
         used_worst = None
         for a in self._currents():
@@ -582,6 +638,9 @@ class RelayTray:
             core.select(provider, int(account_id), name or "")
             core.apply(provider)
             self._force_provider = provider   # 전환 직후 백오프 무시하고 새 계정 즉시 조회
+            blob = self._local_blob(provider)   # 방금 적용한 값은 캡처백 대상에서 제외
+            if blob:
+                self._applied_hash[provider] = hash(blob)
             self._notify(icon, f"{name} 로 전환됨")
         except urllib.error.HTTPError as e:
             if e.code >= 500:
